@@ -1,37 +1,78 @@
 package main
 
 import (
+	"context"
 	"flag"
+	"fmt"
+	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/xiaohongshu-mcp/configs"
+	"github.com/xpzouying/xiaohongshu-mcp/internal/server"
+)
+
+var (
+	// Version is set at build time
+	Version = "dev"
+	// BuildTime is set at build time
+	BuildTime = "unknown"
 )
 
 func main() {
 	var (
-		headless bool
-		binPath  string // 浏览器二进制文件路径
-		port     string
+		port    = flag.Int("port", 8080, "HTTP server port")
+		version = flag.Bool("version", false, "Print version information")
+		debug   = flag.Bool("debug", false, "Enable debug logging")
 	)
-	flag.BoolVar(&headless, "headless", true, "是否无头模式")
-	flag.StringVar(&binPath, "bin", "", "浏览器二进制文件路径")
-	flag.StringVar(&port, "port", ":18060", "端口")
 	flag.Parse()
 
-	if len(binPath) == 0 {
-		binPath = os.Getenv("ROD_BROWSER_BIN")
+	if *version {
+		fmt.Printf("xiaohongshu-mcp version %s (built %s)\n", Version, BuildTime)
+		os.Exit(0)
 	}
 
-	configs.InitHeadless(headless)
-	configs.SetBinPath(binPath)
-
-	// 初始化服务
-	xiaohongshuService := NewXiaohongshuService()
-
-	// 创建并启动应用服务器
-	appServer := NewAppServer(xiaohongshuService)
-	if err := appServer.Start(port); err != nil {
-		logrus.Fatalf("failed to run server: %v", err)
+	// Configure logger
+	logger := log.New(os.Stdout, "[xiaohongshu-mcp] ", log.LstdFlags)
+	if *debug {
+		logger.SetFlags(log.LstdFlags | log.Lshortfile)
+		logger.Println("Debug mode enabled")
 	}
+
+	logger.Printf("Starting xiaohongshu-mcp server v%s on port %d", Version, *port)
+
+	// Create MCP server
+	cfg := server.Config{
+		Port:    *port,
+		Debug:   *debug,
+		Logger:  logger,
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		logger.Fatalf("Failed to create server: %v", err)
+	}
+
+	// Handle graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		if err := srv.Start(ctx); err != nil {
+			logger.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	<-quit
+	logger.Println("Shutting down server...")
+	cancel()
+
+	if err := srv.Stop(); err != nil {
+		logger.Printf("Error during shutdown: %v", err)
+	}
+
+	logger.Println("Server stopped")
 }
